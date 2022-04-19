@@ -38,7 +38,7 @@ class DBSCAN2(override val uid: String) extends Estimator[DBSCAN2Model] with DBS
 
   setDefault(eps -> 0.3, minPoints -> 10, maxPointsPerPartition -> 250)
 
-  def this() = this(Identifiable.randomUID("dbscan"))
+  def this() = this(Identifiable.randomUID("spark_dbscan"))
 
   def setEps(value: Double): this.type = set(eps, value)
 

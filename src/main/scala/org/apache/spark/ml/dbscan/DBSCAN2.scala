@@ -1,7 +1,7 @@
 package org.apache.spark.ml.dbscan
 
 import org.apache.spark.ml.{Estimator, Model}
-import org.apache.spark.ml.param.{DoubleParam, IntParam, ParamMap, Params}
+import org.apache.spark.ml.param.{DoubleParam, IntParam, Param, ParamMap, Params}
 import org.apache.spark.ml.param.shared.{HasFeaturesCol, HasPredictionCol}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
@@ -9,6 +9,7 @@ import org.apache.spark.sql.types.{IntegerType, StructType}
 import org.apache.spark.ml.linalg.{Vector, VectorUDT}
 import org.apache.spark.ml.util.{Identifiable, SchemaUtils}
 import org.apache.spark.sql.functions.{col, udf}
+
 
 /**
   * Created by endy on 17-12-5.
@@ -28,6 +29,11 @@ trait DBSCANParams extends Params with HasFeaturesCol with HasPredictionCol{
 
   def getMaxPointsPerPartition: Int = $(maxPointsPerPartition)
 
+  final val oldModelPath = new Param[String](this, "oldModelPath",
+    "the old version dbscan model Path")
+
+  def getOldModelPath:String = $(oldModelPath)
+
   protected def validateAndTransformSchema(schema: StructType): StructType = {
     SchemaUtils.checkColumnType(schema, $(featuresCol), new VectorUDT)
     SchemaUtils.appendColumn(schema, $(predictionCol), IntegerType)
@@ -36,7 +42,7 @@ trait DBSCANParams extends Params with HasFeaturesCol with HasPredictionCol{
 
 class DBSCAN2(override val uid: String) extends Estimator[DBSCAN2Model] with DBSCANParams{
 
-  setDefault(eps -> 0.3, minPoints -> 10, maxPointsPerPartition -> 250)
+  setDefault(eps -> 0.3, minPoints -> 10, maxPointsPerPartition -> 250,oldModelPath->"")
 
   def this() = this(Identifiable.randomUID("spark_dbscan"))
 
@@ -51,7 +57,7 @@ class DBSCAN2(override val uid: String) extends Estimator[DBSCAN2Model] with DBS
       case Row(point: Vector) => point
     }
 
-    val dbscan = DBSCAN.train(instances, $(eps), $(minPoints), $(maxPointsPerPartition))
+    val dbscan = DBSCAN.train(instances, $(eps), $(minPoints), $(maxPointsPerPartition),$(oldModelPath))
 
     new DBSCAN2Model(uid, dbscan)
   }
@@ -82,4 +88,3 @@ class DBSCAN2Model(override val uid: String, val model: DBSCAN) extends
     validateAndTransformSchema(schema)
   }
 }
-

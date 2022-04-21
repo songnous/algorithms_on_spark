@@ -5,6 +5,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.rdd.RDD
 
+
 /**
   * Top level method for calling DBSCAN
   */
@@ -24,9 +25,10 @@ object DBSCAN {
              data: RDD[Vector],
              eps: Double,
              minPoints: Int,
-             maxPointsPerPartition: Int): DBSCAN = {
+             maxPointsPerPartition: Int,
+             oldModelPath:String): DBSCAN = {
 
-    new DBSCAN(eps, minPoints, maxPointsPerPartition, null, null).train(data)
+    new DBSCAN(eps, minPoints, maxPointsPerPartition, oldModelPath,null, null).train(data)
 
   }
 
@@ -45,9 +47,9 @@ object DBSCAN {
 class DBSCAN private ( val eps: Double,
                        val minPoints: Int,
                        val maxPointsPerPartition: Int,
+                       val oldModelPath:String,
                        @transient val partitions: List[(Int, DBSCANRectangle)],
-                       @transient private val labeledPartitionedPoints:
-                       RDD[(Int, DBSCANLabeledPoint)])
+                       @transient private val labeledPartitionedPoints: RDD[(Int, DBSCANLabeledPoint)])
 
   extends Serializable with Logging {
 
@@ -216,9 +218,43 @@ class DBSCAN private ( val eps: Double,
       eps,
       minPoints,
       maxPointsPerPartition,
+      oldModelPath,
       finalPartitions,
       labeledInner.union(labeledOuter))
 
+  }
+
+  /**
+   * increment training
+   * 步骤：
+   * 1.加载上一版本DBSCAN得训练模型，去除所有聚类结果得中心点，即label_point 得Flag 为Core
+   * 2.计算新来得一批增量数据得每个点与 已有聚类中心点得距离：得到距离最近的Core点信息 及 min_distance
+   * 3.检查这个新的点
+   *    一、周围的点数量 num_ps > minPoints  && min_distance < new eps
+   *    将这个新的点归类到这个聚簇当中，并且更新这个聚簇的中心
+   *    二、如果与已有最近中心的距离 min_distance > new eps ，则这个点不属于已有类 ，暂且标记为noise 放在一个数据结构里 beyond_points
+   *      对这个beyond_points 重新进行localDBSCAN算法，看聚类成新的簇信息， 最后与已有模型合并(已有模型包括 标记点的信息更新、中心点更新、
+   *      点都为已访问，当然参数minPoints，eps都更新为新的。说明：一般增量的话，按理说minPoints、eps
+   *      这种参数不应改变，而是对整体数据重新训练，视业务情况而决定)
+   *
+   */
+  private def train(vectors: RDD[Vector],oldModelPath:String): Unit = {
+    //加载oldmodel
+
+
+    // generate the smallest rectangles that split the space
+    // and count how many points are contained in each one of them
+//    val minimumRectanglesWithCount =
+//    vectors
+//      .map(toMinimumBoundingRectangle)
+//      .map((_, 1))
+//      .aggregateByKey(0)(_ + _, _ + _)
+//      .collect()
+//      .toSet
+//
+//    // find the best partitions for the data space
+//    val localPartitions = EvenSplitPartitioner
+//      .partition(minimumRectanglesWithCount, maxPointsPerPartition, minimumRectangleSize)
   }
 
   /**

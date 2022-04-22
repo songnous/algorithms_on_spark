@@ -57,7 +57,7 @@ class DBSCAN2(override val uid: String) extends Estimator[DBSCAN2Model] with DBS
       case Row(point: Vector) => point
     }
 
-    val dbscan = DBSCAN.train(instances, $(eps), $(minPoints), $(maxPointsPerPartition),$(oldModelPath))
+    val dbscan = DBSCAN.train(instances, $(eps), $(minPoints), $(maxPointsPerPartition),$(oldModelPath),dataset.sparkSession)
 
     new DBSCAN2Model(uid, dbscan)
   }

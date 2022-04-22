@@ -4,15 +4,19 @@ import org.apache.hadoop.fs.Path
 import org.apache.spark.SparkContext
 import org.apache.spark.ml.dbscan.DBSCANLabeledPoint.Flag
 import org.apache.spark.internal.Logging
-import org.apache.spark.ml.linalg.Vector
+import org.apache.spark.ml.linalg.{Vector, VectorUDT}
+import org.apache.spark.mllib.clustering.{EuclideanDistanceMeasure, VectorWithNorm}
 import org.apache.spark.mllib.util.{Loader, Saveable}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.ScalaReflection
-import org.apache.spark.sql.types.{DataType, StructField, StructType}
-import org.apache.spark.sql.{SparkSession}
+import org.apache.spark.sql.functions.{col, udf}
+import org.apache.spark.sql.types.{DataType, DoubleType, IntegerType, StructField, StructType}
+import org.apache.spark.sql.{Row, SparkSession}
 import org.json4s.{DefaultFormats, JValue}
 import org.json4s.jackson.JsonMethods.{compact, parse, render}
 import org.json4s.JsonDSL._
+
+import scala.collection.mutable.ListBuffer
 import scala.reflect.runtime.universe.TypeTag
 
 
@@ -36,9 +40,10 @@ object DBSCAN extends Loader[DBSCAN] {
              eps: Double,
              minPoints: Int,
              maxPointsPerPartition: Int,
-             oldModelPath: String): DBSCAN = {
+             oldModelPath: String,
+             ss:SparkSession): DBSCAN = {
 
-    new DBSCAN(eps, minPoints, maxPointsPerPartition, oldModelPath, null, null).train(data)
+    new DBSCAN(eps, minPoints, maxPointsPerPartition, oldModelPath, null, null).train(data,ss)
 
   }
 
@@ -112,7 +117,7 @@ object DBSCAN extends Loader[DBSCAN] {
       labeledPartitionedPoints.values
     }
 
-    private def train(vectors: RDD[Vector]): DBSCAN = {
+    private def train(vectors: RDD[Vector],ss:SparkSession): DBSCAN = {
       // generate the smallest rectangles that split the space
       // and count how many points are contained in each one of them
       val minimumRectanglesWithCount =
@@ -277,19 +282,60 @@ object DBSCAN extends Loader[DBSCAN] {
     /**
      * increment training
      * 步骤：
-     * 1.加载上一版本DBSCAN得训练模型，去除所有聚类结果得中心点，即label_point 得Flag 为Core
+     * 1.加载上一版本DBSCAN得训练模型，得到所有聚类结果得中心点，即label_point 得Flag 为Core
      * 2.计算新来得一批增量数据得每个点与 已有聚类中心点得距离：得到距离最近的Core点信息 及 min_distance
      * 3.检查这个新的点
      * 一、周围的点数量 num_ps > minPoints  && min_distance < new eps
      * 将这个新的点归类到这个聚簇当中，并且更新这个聚簇的中心
-     * 二、如果与已有最近中心的距离 min_distance > new eps ，则这个点不属于已有类 ，暂且标记为noise 放在一个数据结构里 beyond_points
-     * 对这个beyond_points 重新进行localDBSCAN算法，看聚类成新的簇信息， 最后与已有模型合并(已有模型包括 标记点的信息更新、中心点更新、
-     * 点都为已访问，当然参数minPoints，eps都更新为新的。说明：一般增量的话，按理说minPoints、eps
-     * 这种参数不应改变，而是对整体数据重新训练，视业务情况而决定)
+     * 二、如果与已有最近中心的距离 min_distance > new eps ，则这个点不属于已有类 ，暂且标记为noise 放在一个数据结构里 beyond_points；
+     * 并且将上一版本的模型中DBSCANLabeledPoint 的Flag为noise 放到beyond_points(noise),看是否可以聚成新类；
+     *      对这个beyond_points 重新进行localDBSCAN算法，看聚类成新的簇信息， 最后与已有模型合并(已有模型包括 标记点的信息更新、中心点更新、
+     *      点都为已访问，当然参数minPoints，eps都更新为新的。说明：一般增量的话，按理说minPoints、eps
+     *      这种参数不应改变，而是对整体数据重新训练，视业务情况而决定)
      *
      */
-    private def train(vectors: RDD[Vector], oldModelPath: String): Unit = {
-      //加载oldmodel
+    private def train(vectors: RDD[Vector], oldModelPath: String,ss:SparkSession): Unit = {
+      //加载oldmodel,过滤得到核心点core point
+      val oldModel = DBSCAN.load(vectors.sparkContext,oldModelPath)
+      val labelPoints = oldModel.labeledPoints
+      val corePoints = labelPoints.filter(l=>{
+        if(l.flag.equals(DBSCANLabeledPoint.Flag.Core)){
+           true
+        }else{
+           false
+        }
+      })
+      //计算新来得一批增量数据得每个点与 已有聚类中心点得距离：得到距离最近的Core点信息 及 min_distance
+      val corePList:ListBuffer[VectorWithNorm] = null
+      val pClusterList:ListBuffer[Int] = null
+      val corePointsWithNorm = corePoints.flatMap(cp=>{
+        corePList  += new VectorWithNorm(org.apache.spark.mllib.linalg.Vectors.fromML(cp.vector.toDense),2.0)
+        pClusterList += cp.cluster
+        corePList
+      }).collect()
+      val bClusters = ss.sparkContext.broadcast(pClusterList.zipWithIndex)
+      val min_d_rdd = vectors.mapPartitions(p=>{
+        val distanceMeasureInstance = new EuclideanDistanceMeasure
+        p.map(v=>{
+          val min_center = distanceMeasureInstance.findClosest(corePointsWithNorm,new VectorWithNorm(org.apache.spark.mllib.linalg.Vectors.fromML(v.toDense),2.0))
+          Row(v,min_center._1,min_center._2)
+        })
+      })
+      var min_d_df = ss.createDataFrame(min_d_rdd,StructType(Array(StructField("point_vector",new VectorUDT,false),StructField("zip_index",IntegerType,false),StructField("min_distance",DoubleType,false))))
+      val cal_cluster_ndx = udf((index:Int)=>{
+        val clusters = bClusters.value
+        clusters.map(x=>(x._2,x._1)).toMap.get(index)
+      })
+      val cal_flag = udf((min_d:Double)=>{
+        if(min_d <= eps){
+          DBSCANLabeledPoint.Flag.Border
+        }else{
+          DBSCANLabeledPoint.Flag.Noise
+        }
+      })
+      min_d_df = min_d_df.withColumn("cluster_index",cal_cluster_ndx(col("zip_index")))
+        .withColumn("flag",cal_flag(col("min_distance")))
+      //将增量训练的数据 noise点过滤出来和  旧模型中噪音点 融合一起，重新聚类这一部分噪音点，看是否聚成新簇
 
 
       // generate the smallest rectangles that split the space
@@ -306,6 +352,7 @@ object DBSCAN extends Loader[DBSCAN] {
       //    val localPartitions = EvenSplitPartitioner
       //      .partition(minimumRectanglesWithCount, maxPointsPerPartition, minimumRectangleSize)
     }
+
 
     /**
      * Find the appropriate label to the given `vector`

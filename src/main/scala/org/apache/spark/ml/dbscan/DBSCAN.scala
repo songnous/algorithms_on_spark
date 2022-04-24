@@ -199,23 +199,7 @@ object DBSCAN extends Loader[DBSCAN] {
           .toList
 
       // assign a global Id to all clusters, where connected clusters get the same id
-      val (total, clusterIdToGlobalId) = localClusterIds.foldLeft((0, Map[ClusterId, Int]())) {
-        case ((id, map), clusterId) => {
-
-          map.get(clusterId) match {
-            case None => {
-              val nextId = id + 1
-              val connectedClusters = adjacencyGraph.getConnected(clusterId) + clusterId
-              logDebug(s"Connected clusters $connectedClusters")
-              val toadd = connectedClusters.map((_, nextId)).toMap
-              (nextId, map ++ toadd)
-            }
-            case Some(x) =>
-              (id, map)
-          }
-
-        }
-      }
+      val (total, clusterIdToGlobalId) = assign_global_cluster_id(localClusterIds,adjacencyGraph)
 
       logDebug("Global Clusters")
       clusterIdToGlobalId.foreach(e => logDebug(e.toString))
@@ -294,7 +278,7 @@ object DBSCAN extends Loader[DBSCAN] {
      *      这种参数不应改变，而是对整体数据重新训练，视业务情况而决定)
      *
      */
-    private def train(vectors: RDD[Vector], oldModelPath: String,ss:SparkSession): Unit = {
+    private def train_incre(vectors: RDD[Vector], oldModelPath: String,ss:SparkSession): Unit = {
       //加载oldmodel,过滤得到核心点core point
       val oldModel = DBSCAN.load(vectors.sparkContext,oldModelPath)
       val labelPoints = oldModel.labeledPoints
@@ -336,23 +320,40 @@ object DBSCAN extends Loader[DBSCAN] {
       min_d_df = min_d_df.withColumn("cluster_index",cal_cluster_ndx(col("zip_index")))
         .withColumn("flag",cal_flag(col("min_distance")))
       //将增量训练的数据 noise点过滤出来和  旧模型中噪音点 融合一起，重新聚类这一部分噪音点，看是否聚成新簇
+      val new_noise  = min_d_df.filter(col("flag")===(DBSCANLabeledPoint.Flag.Noise)).select("point_vector")
+      val old_noise_rdd = labelPoints.filter(lb=>{lb.flag==DBSCANLabeledPoint.Flag.Noise}).map(r=>{
+        Row(r.vector)
+      })
+      //重新构造新的聚类数据，也就是将二部分噪声点合并
+      val all_noise = new_noise.rdd.union(old_noise_rdd).map(r=>r.getAs[Vector](0))
+      /**
+       * 噪声点重新喂到非增量原始dbscan当中
+       */
+      val noise_model = train(all_noise,ss)
 
+      //将后面形成新聚簇的id，重新分配一个全局的id
 
-      // generate the smallest rectangles that split the space
-      // and count how many points are contained in each one of them
-      //    val minimumRectanglesWithCount =
-      //    vectors
-      //      .map(toMinimumBoundingRectangle)
-      //      .map((_, 1))
-      //      .aggregateByKey(0)(_ + _, _ + _)
-      //      .collect()
-      //      .toSet
-      //
-      //    // find the best partitions for the data space
-      //    val localPartitions = EvenSplitPartitioner
-      //      .partition(minimumRectanglesWithCount, maxPointsPerPartition, minimumRectangleSize)
     }
 
+    def assign_global_cluster_id(localClusterIds:List[(Int,Int)],adjacencyGraph:DBSCANGraph[(Int,Int)]):(Int, Map[ClusterId, Int])={
+      localClusterIds.foldLeft((0, Map[ClusterId, Int]())) {
+        case ((id, map), clusterId) => {
+
+          map.get(clusterId) match {
+            case None => {
+              val nextId = id + 1
+              val connectedClusters = adjacencyGraph.getConnected(clusterId) + clusterId
+              logDebug(s"Connected clusters $connectedClusters")
+              val toadd = connectedClusters.map((_, nextId)).toMap
+              (nextId, map ++ toadd)
+            }
+            case Some(x) =>
+              (id, map)
+          }
+
+        }
+      }
+    }
 
     /**
      * Find the appropriate label to the given `vector`
